@@ -210,7 +210,13 @@ async function statusForRepo(dir: string, prefix: string, out: string): Promise<
 async function collectStatus(worktree: string): Promise<VcsStatus[]> {
   const items: VcsStatus[] = []
 
-  const rootOut = await git(worktree, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+  let rootOut: string
+  try {
+    rootOut = await git(worktree, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+  } catch {
+    // 非 git 目录：静默返回空列表
+    return []
+  }
   items.push(...(await statusForRepo(worktree, "", rootOut)))
 
   for (const repo of discoverChildRepos(worktree)) {
