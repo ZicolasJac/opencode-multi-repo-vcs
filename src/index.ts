@@ -178,6 +178,15 @@ async function countLines(filePath: string): Promise<number> {
   try {
     const stat = await fsp.stat(filePath)
     if (!stat.isFile() || stat.size > MAX_UNTRACKED_BYTES) return 0
+    const handle = await fsp.open(filePath, "r")
+    try {
+      const head = Buffer.alloc(8192)
+      const { bytesRead } = await handle.read(head, 0, head.length, 0)
+      // 前 8KiB 含 NUL 字节视为二进制，不计入行数
+      if (head.subarray(0, bytesRead).includes(0)) return 0
+    } finally {
+      await handle.close()
+    }
     const content = await fsp.readFile(filePath, "utf8")
     if (content.length === 0) return 0
     const lines = content.split(/\r\n|\r|\n/)

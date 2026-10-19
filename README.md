@@ -33,9 +33,15 @@ UI 层观察项：
 3. `diff`：按请求路径前缀路由到所属仓库，执行对应 mode（working / branch / committed）的 `git diff`；
 4. `info` / `branches`：以根仓库为准，失败时容错返回。
 
-## 接入方式
+## 当前部署（2026-10-19）
 
-### 方式一：项目级（试点）
+- **已全局启用**：`C:\Users\Zicol\.config\opencode\opencode.json` 的 `plugins` 数组引用本项目绝对路径（`D:/zjc-ai-workspace/opencode-multi-repo-vcs`），所有工作区生效；配置热重载，无需重启；
+- 试点工作区的 Junction 已移除（统一由全局配置提供）；
+- 回退：删除 `plugins` 数组中的对应条目（改动前备份：`opencode.json.bak-20261019`）。
+
+## 接入方式（参考）
+
+### 方式一：项目级（单工作区）
 
 在工作区放一个 Junction 指向本项目：
 
