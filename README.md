@@ -16,12 +16,14 @@ MVP 已实现并在 D:\ai-workspace\jspg-data-labeling-aiws 试点通过 **API �
 | provider 接管 | `GET /api/vcs` 返回 `provider: "multi-repo"`，`branch.current/default` 正确 |
 | status 聚合 | 子仓库文件以 `.codespace/<repo>/` 前缀返回，`additions` 正确 |
 | diff 路由 | 按前缀路由到子仓库，patch 生成正确（含 new file / hunk） |
+| untracked 新文件 diff | `git diff --no-index` 构造 patch，实测通过（2026-10-19 修复） |
+| 源码热重载 | 修改 `src/index.ts` 后 server 自动 cleanup + setup（实测 8 秒内生效） |
 | 清理恢复 | 测试产生的临时文件清理后，API 恢复空数组 |
 
-UI 层观察项（人工确认）：
+UI 层观察项：
 
-- [ ] 变更栏出现 `.codespace/<repo>/...` 条目并可展开查看 diff
-- [ ] 变更后自动刷新（还是需要 Ctrl+R）——需要观察 `filesystem.changed` 事件是否覆盖 `.codespace`
+- [x] 变更栏出现 `.codespace/<repo>/...` 条目并可展开查看 diff（2026-10-19 用户界面确认：层级、A 标记、diff 内容/行号/中文均正常）
+- [ ] 变更后自动刷新（还是需要 Ctrl+R）——待日常使用中观察
 
 ## 工作原理
 
@@ -61,7 +63,7 @@ New-Item -ItemType Junction -Path "D:\ai-workspace\jspg-data-labeling-aiws\.open
 
 ## 已知限制
 
-- **untracked 且未暂存（未 `git add`）的新文件不出现在 diff 结果里**（status 中可见，标 added）——git diff 不显示未跟踪文件；后续版本计划用构造 patch 的方式补齐；
+- untracked 新文件：已支持 diff（`git diff --no-index` 构造 patch）；上限为单仓库每次最多 50 个未跟踪文件、单文件 2MiB（超出仅 status 可见，diff 留空）；
 - `/undo` 快照回滚不会覆盖子仓库文件（OpenCode 快照机制跳过 git-ignored 路径，与本插件无关，属官方 issue #30065）；
 - 子仓库发现只扫描 `.codespace/*` 一层目录；
 - `additions/deletions` 对超大未跟踪文件（>2MiB）计 0。

@@ -76,6 +76,21 @@ function git(cwd: string, args: string[], maxBuffer = 32 * 1024 * 1024): Promise
   })
 }
 
+/**
+ * 允许非零退出码的 git 调用。
+ * `git diff --no-index` 在存在差异时退出码为 1，属于正常情况，标准输出仍是完整 patch。
+ */
+function gitAllowFailure(cwd: string, args: string[], maxBuffer = 32 * 1024 * 1024): Promise<string> {
+  return new Promise((resolve) => {
+    execFile(
+      "git",
+      ["-c", "core.quotepath=false", ...args],
+      { cwd, maxBuffer, windowsHide: true, encoding: "utf8" },
+      (_error, stdout) => resolve(String(stdout ?? "")),
+    )
+  })
+}
+
 function normalize(value: string): string {
   return value.replace(/\\/g, "/").replace(/^\.\//, "")
 }
@@ -123,6 +138,17 @@ function mapStatus(xy: string): "added" | "deleted" | "modified" {
   if (x === "A" || x === "?") return "added"
   if (x === "D" || y === "D") return "deleted"
   return "modified"
+}
+
+async function listUntracked(dir: string): Promise<string[]> {
+  try {
+    const out = await git(dir, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+    return parsePorcelain(out)
+      .filter((record) => record.xy === "??")
+      .map((record) => record.file)
+  } catch {
+    return []
+  }
 }
 
 async function numstatMap(dir: string): Promise<Map<string, { additions: number; deletions: number }>> {
@@ -272,6 +298,29 @@ async function resolveMergeBase(dir: string, base?: string): Promise<string | nu
   return null
 }
 
+const MAX_UNTRACKED_DIFF_FILES = 50
+
+/**
+ * `git diff` 不包含未跟踪文件，这里为每个未跟踪文件用
+ * `git diff --no-index -- /dev/null <file>` 构造标准的新增文件 patch。
+ */
+async function collectUntrackedDiff(dir: string, context: number): Promise<DiffInfo[]> {
+  const result: DiffInfo[] = []
+  const files = await listUntracked(dir)
+  for (const file of files.slice(0, MAX_UNTRACKED_DIFF_FILES)) {
+    try {
+      const full = path.join(dir, file)
+      const stat = await fsp.stat(full)
+      if (!stat.isFile() || stat.size > MAX_UNTRACKED_BYTES) continue
+      const text = await gitAllowFailure(dir, ["diff", "--no-index", `-U${context}`, "--", "/dev/null", file])
+      result.push(...parsePatch(text))
+    } catch (error) {
+      log("untracked diff failed", { dir, file, error: String(error) })
+    }
+  }
+  return result
+}
+
 async function collectDiff(
   dir: string,
   mode: DiffInput["mode"],
@@ -297,7 +346,11 @@ async function collectDiff(
     log("diff failed", { dir, mode, error: String(error) })
     return []
   }
-  return parsePatch(text)
+  const diffs = parsePatch(text)
+  if (mode === "working") {
+    diffs.push(...(await collectUntrackedDiff(dir, context)))
+  }
+  return diffs
 }
 
 async function aggregateDiff(input: DiffInput): Promise<DiffInfo[]> {
