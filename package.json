@@ -1,6 +1,6 @@
 {
   "name": "opencode-multi-repo-vcs",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Aggregate uncommitted changes from nested Git repositories into OpenCode's review panel",
   "type": "module",
   "license": "MIT",
@@ -12,6 +12,14 @@
     "monorepo",
     "nested-repositories"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/ZicolasJac/opencode-multi-repo-vcs.git"
+  },
+  "homepage": "https://github.com/ZicolasJac/opencode-multi-repo-vcs#readme",
+  "bugs": {
+    "url": "https://github.com/ZicolasJac/opencode-multi-repo-vcs/issues"
+  },
   "exports": {
     ".": "./dist/index.js",
     "./server": "./dist/index.js"
