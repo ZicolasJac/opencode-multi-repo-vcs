@@ -107,7 +107,16 @@ function discoverChildRepos(worktree: string): ChildRepo[] {
   }
   const repos: ChildRepo[] = []
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue
+    // junction / symlink 指向的目录，Dirent.isDirectory() 为 false，需要 stat 兜底
+    let isDir = entry.isDirectory()
+    if (!isDir) {
+      try {
+        isDir = fs.statSync(path.join(root, entry.name)).isDirectory()
+      } catch {
+        isDir = false
+      }
+    }
+    if (!isDir) continue
     const dir = path.join(root, entry.name)
     if (fs.existsSync(path.join(dir, ".git"))) repos.push({ name: entry.name, dir })
   }
@@ -151,13 +160,41 @@ async function listUntracked(dir: string): Promise<string[]> {
   }
 }
 
+/**
+ * 空仓库（unborn branch）没有 HEAD，`git diff HEAD` / `git diff --numstat HEAD`
+ * 会报 `fatal: bad revision 'HEAD'`，但 staged / worktree 的改动依然存在。
+ */
+function isMissingHead(error: unknown): boolean {
+  const text = String(error)
+  return (
+    text.includes("bad revision 'HEAD'") ||
+    text.includes("unknown revision") ||
+    text.includes("does not have any commits") ||
+    text.includes("needed a single revision")
+  )
+}
+
+async function gitTextOrEmpty(dir: string, args: string[]): Promise<string> {
+  try {
+    return await git(dir, args)
+  } catch {
+    return ""
+  }
+}
+
 async function numstatMap(dir: string): Promise<Map<string, { additions: number; deletions: number }>> {
   const map = new Map<string, { additions: number; deletions: number }>()
   let out: string
   try {
     out = await git(dir, ["diff", "--numstat", "-z", "HEAD", "--"])
-  } catch {
-    return map
+  } catch (error) {
+    if (!isMissingHead(error)) return map
+    // 空仓库：空树↔index（已暂存）+ index↔worktree（未暂存）
+    const parts = [
+      await gitTextOrEmpty(dir, ["diff", "--numstat", "-z", "--cached", "--"]),
+      await gitTextOrEmpty(dir, ["diff", "--numstat", "-z", "--"]),
+    ]
+    out = parts.join("\0")
   }
   for (const chunk of out.split("\0")) {
     if (!chunk) continue
@@ -166,9 +203,10 @@ async function numstatMap(dir: string): Promise<Map<string, { additions: number;
     const file = normalize(parts.slice(2).join("\t"))
     const additions = parts[0] === "-" ? 0 : Number.parseInt(parts[0], 10)
     const deletions = parts[1] === "-" ? 0 : Number.parseInt(parts[1], 10)
+    const prev = map.get(file)
     map.set(file, {
-      additions: Number.isFinite(additions) ? additions : 0,
-      deletions: Number.isFinite(deletions) ? deletions : 0,
+      additions: (prev?.additions ?? 0) + (Number.isFinite(additions) ? additions : 0),
+      deletions: (prev?.deletions ?? 0) + (Number.isFinite(deletions) ? deletions : 0),
     })
   }
   return map
@@ -219,14 +257,14 @@ async function statusForRepo(dir: string, prefix: string, out: string): Promise<
 async function collectStatus(worktree: string): Promise<VcsStatus[]> {
   const items: VcsStatus[] = []
 
-  let rootOut: string
+  let rootOut = ""
   try {
     rootOut = await git(worktree, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
   } catch {
-    // 非 git 目录：静默返回空列表
-    return []
+    // 根目录不是 git 仓库：跳过根，但仍继续聚合 .codespace 子仓库
+    log("root repo status failed", { worktree: String(worktree) })
   }
-  items.push(...(await statusForRepo(worktree, "", rootOut)))
+  if (rootOut) items.push(...(await statusForRepo(worktree, "", rootOut)))
 
   for (const repo of discoverChildRepos(worktree)) {
     try {
@@ -292,15 +330,21 @@ function parsePatch(text: string): DiffInfo[] {
 
 async function resolveMergeBase(dir: string, base?: string): Promise<string | null> {
   const candidates: string[] = []
-  if (base) candidates.push(base)
-  else {
+  if (base) {
+    // 显式基线优先；子仓库可能只有本地同名分支，补一个去 origin/ 的候选
+    candidates.push(base)
+    if (base.startsWith("origin/")) candidates.push(base.slice("origin/".length))
+  } else {
     try {
       const head = (await git(dir, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])).trim()
       if (head) candidates.push(head)
     } catch {
       // 无 origin/HEAD 时走常见默认分支兜底
     }
-    candidates.push("origin/main", "origin/master", "main", "master")
+  }
+  // 同一工作区的子仓库未必都有显式基线，统一用常见默认分支兜底
+  for (const ref of ["origin/main", "origin/master", "main", "master"]) {
+    if (!candidates.includes(ref)) candidates.push(ref)
   }
   for (const ref of candidates) {
     try {
@@ -336,6 +380,24 @@ async function collectUntrackedDiff(dir: string, context: number): Promise<DiffI
   return result
 }
 
+/** 同一文件可能同时出现在 staged 与 unstaged 两段 diff 里，按文件合并避免重复条目。 */
+function mergeDiffs(list: DiffInfo[]): DiffInfo[] {
+  const map = new Map<string, DiffInfo>()
+  for (const item of list) {
+    const prev = map.get(item.file)
+    if (!prev) {
+      map.set(item.file, { ...item })
+      continue
+    }
+    prev.patch = `${prev.patch}\n${item.patch}`.trim()
+    prev.additions += item.additions
+    prev.deletions += item.deletions
+    if (item.status === "added") prev.status = "added"
+    else if (item.status === "deleted" && prev.status === "modified") prev.status = "deleted"
+  }
+  return [...map.values()]
+}
+
 async function collectDiff(
   dir: string,
   mode: DiffInput["mode"],
@@ -343,27 +405,42 @@ async function collectDiff(
   context: number,
 ): Promise<DiffInfo[]> {
   const common = ["--no-color", `-U${context}`]
-  let args: string[]
+  let text: string
   if (mode === "working") {
-    args = ["diff", ...common, "HEAD", "--"]
+    try {
+      text = await git(dir, ["diff", ...common, "HEAD", "--"])
+    } catch (error) {
+      if (!isMissingHead(error)) {
+        log("diff failed", { dir, mode, error: String(error) })
+        return []
+      }
+      // 空仓库（没有任何提交）：HEAD 不存在，退化为
+      // 空树↔index（已暂存）+ index↔worktree（未暂存），未跟踪文件另行收集。
+      log("diff HEAD missing, fallback to index/worktree", { dir })
+      const parts = [
+        await gitTextOrEmpty(dir, ["diff", ...common, "--cached", "--"]),
+        await gitTextOrEmpty(dir, ["diff", ...common, "--"]),
+      ]
+      text = parts.join("\n")
+    }
   } else {
     const merged = await resolveMergeBase(dir, base)
     if (!merged) return []
-    args =
+    const args =
       mode === "branch"
         ? ["diff", ...common, merged, "--"]
         : ["diff", ...common, `${merged}..HEAD`, "--"]
+    try {
+      text = await git(dir, args)
+    } catch (error) {
+      log("diff failed", { dir, mode, error: String(error) })
+      return []
+    }
   }
-  let text: string
-  try {
-    text = await git(dir, args)
-  } catch (error) {
-    log("diff failed", { dir, mode, error: String(error) })
-    return []
-  }
-  const diffs = parsePatch(text)
+  const diffs = mergeDiffs(parsePatch(text))
   if (mode === "working") {
-    diffs.push(...(await collectUntrackedDiff(dir, context)))
+    const untracked = await collectUntrackedDiff(dir, context)
+    return mergeDiffs([...diffs, ...untracked])
   }
   return diffs
 }
@@ -427,6 +504,81 @@ async function listBranches(dir: string, input: BranchesInput): Promise<string[]
   }
 }
 
+/**
+ * 2.1.0+ 的审阅基线（`GET /api/vcs/base`）：
+ * 优先按分支创建历史（reflog）推断，其次回落到仓库默认分支；
+ * detached HEAD / 空仓库 / 无法确定时返回 null。
+ *
+ * 返回的是**分支名/引用**而不是 merge-base commit，
+ * 这样根仓库和每个 `.codespace` 子仓库都能各自解析自己的基线。
+ */
+type ReviewBase = { name: string; ref: string; source: "reflog" | "default" }
+
+async function refExists(dir: string, ref: string): Promise<boolean> {
+  try {
+    await git(dir, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function branchCreatedFrom(dir: string, branch: string): Promise<string | null> {
+  try {
+    const out = await git(dir, ["reflog", "show", "--format=%gs", branch])
+    for (const raw of out.split("\n")) {
+      const match = raw.trim().match(/^branch: Created from (.+)$/)
+      if (!match) continue
+      const from = match[1].trim()
+      // "Created from HEAD" 无法定位具体分支，交给默认分支兜底
+      if (!from || from === "HEAD") continue
+      return from
+    }
+  } catch {
+    // 无 reflog（浅克隆 / 手工构造的仓库）时交给默认分支兜底
+  }
+  return null
+}
+
+async function reviewBase(dir: string): Promise<ReviewBase | null> {
+  const current = await currentBranch(dir)
+  if (!current) return null
+
+  const detected = await defaultBranch(dir)
+  const names = detected ? [detected] : ["main", "master"]
+  let defaultName: string | undefined
+  let defaultRef: string | undefined
+  for (const name of names) {
+    if (await refExists(dir, `origin/${name}`)) {
+      defaultName = name
+      defaultRef = `origin/${name}`
+      break
+    }
+    if (await refExists(dir, name)) {
+      defaultName = name
+      defaultRef = name
+      break
+    }
+  }
+  const fallback: ReviewBase | null =
+    defaultName && defaultRef ? { name: defaultName, ref: defaultRef, source: "default" } : null
+
+  // 当前就在默认分支上：基线即默认分支本身
+  if (defaultName && current === defaultName) return fallback
+
+  const from = await branchCreatedFrom(dir, current)
+  if (from) {
+    const candidates = from.startsWith("origin/") ? [from, from.slice("origin/".length)] : [from, `origin/${from}`]
+    for (const ref of candidates) {
+      if (await refExists(dir, ref)) {
+        return { name: ref.replace(/^origin\//, ""), ref, source: "reflog" }
+      }
+    }
+  }
+
+  return fallback
+}
+
 export default Plugin.define({
   id: "multi-repo-vcs",
   async setup(ctx) {
@@ -443,6 +595,16 @@ export default Plugin.define({
           },
         }),
         branches: async (input) => listBranches(input.worktree, input),
+        base: async (input) => {
+          try {
+            const base = await reviewBase(input.worktree)
+            log("base served", { base })
+            return base
+          } catch (error) {
+            log("base failed", String(error))
+            return null
+          }
+        },
         status: async (input) => {
           try {
             const items = await collectStatus(input.worktree)

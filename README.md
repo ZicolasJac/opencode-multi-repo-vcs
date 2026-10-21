@@ -4,9 +4,9 @@
 
 - 插件 id：`multi-repo-vcs`
 - VCS provider id：`multi-repo`
-- 目标 OpenCode：V2（desktop 2.0.32 实测通过）
+- 目标 OpenCode：V2（desktop 2.0.32 / 2.1.0 / 2.1.1 实测通过）
 
-## 状态（2026-10-19）
+## 状态（2026-10-21）
 
 MVP 已实现并在 D:\ai-workspace\jspg-data-labeling-aiws 试点通过 **API 层**实测：
 
@@ -17,6 +17,9 @@ MVP 已实现并在 D:\ai-workspace\jspg-data-labeling-aiws 试点通过 **API �
 | status 聚合 | 子仓库文件以 `.codespace/<repo>/` 前缀返回，`additions` 正确 |
 | diff 路由 | 按前缀路由到子仓库，patch 生成正确（含 new file / hunk） |
 | untracked 新文件 diff | `git diff --no-index` 构造 patch，实测通过（2026-10-19 修复） |
+| 空仓库子仓库 diff | 无任何提交（unborn HEAD）的子仓库回退到 `--cached` + 工作区 diff，staged/untracked 均能出 patch（2026-10-21 修复） |
+| 审阅基线 base | 2.1.0+ `GET /api/vcs/base`：按分支 reflog 创建来源推断，失败回落默认分支（2026-10-21 实现） |
+| `.codespace` 子目录为 junction | 发现逻辑用 `statSync` 兜底，junction/symlink 也能识别（2026-10-21 修复） |
 | 源码热重载 | 修改 `src/index.ts` 后 server 自动 cleanup + setup（实测 8 秒内生效） |
 | 清理恢复 | 测试产生的临时文件清理后，API 恢复空数组 |
 
@@ -32,6 +35,7 @@ UI 层观察项：
    `git status --porcelain=v1 -z --untracked-files=all`，子仓库路径统一加前缀；
 3. `diff`：按请求路径前缀路由到所属仓库，执行对应 mode（working / branch / committed）的 `git diff`；
 4. `info` / `branches`：以根仓库为准，失败时容错返回。
+5. `base`：按当前分支的 reflog 创建来源推断审阅基线，拿不到则回落仓库默认分支（`origin/main` → `main` → `origin/master` → `master`），detached HEAD / 空仓库返回 `null`。
 
 ## 当前部署（2026-10-19）
 
@@ -71,6 +75,9 @@ New-Item -ItemType Junction -Path "D:\ai-workspace\jspg-data-labeling-aiws\.open
 
 - untracked 新文件：已支持 diff（`git diff --no-index` 构造 patch）；上限为单仓库每次最多 50 个未跟踪文件、单文件 2MiB（超出仅 status 可见，diff 留空）；
 - `/undo` 快照回滚不会覆盖子仓库文件（OpenCode 快照机制跳过 git-ignored 路径，与本插件无关，属官方 issue #30065）；
+- 「最后一轮变更」（`turn` 模式）走 OpenCode 自带 `session.diff` 快照，不经过本 provider，因此该模式看不到 `.codespace` 子仓库改动；看多仓聚合请用「Git changes」模式；
+- 工作区刚打开、插件 `setup` 尚未完成时，宿主可能短暂回退到内置 git provider（表现为一次只含根仓库的结果），随后的事件/刷新会自动纠正；
+- 根仓库若没有忽略 `.codespace/`，`status` 会额外出现一条 `.codespace/<repo>/` 目录条目（属根仓库未跟踪目录，与子仓库文件条目并存，不影响 diff）；
 - 子仓库发现只扫描 `.codespace/*` 一层目录；
 - `additions/deletions` 对超大未跟踪文件（>2MiB）计 0。
 
@@ -78,7 +85,7 @@ New-Item -ItemType Junction -Path "D:\ai-workspace\jspg-data-labeling-aiws\.open
 
 - 入口：`index.ts`（转发）→ `src/index.ts`（实现）
 - 安装依赖：`npm install`
-- 类型来源：`@opencode/plugin@2.0.32`（与 OpenCode 版本对齐）
+- 类型来源：`@opencode/plugin@2.1.1`（与当前桌面端 CLI 版本对齐；插件 API 在 2.0.32 → 2.1.x 未变）
 - 探针日志：`.dev/plugin.log`
 - server 日志：`C:\Users\Zicol\.local\share\opencode\log\opencode.log`（搜索 `multi-repo-vcs`）
 - 修改源码后 server 自动重载（watcher 已订阅），无需重启
@@ -86,7 +93,8 @@ New-Item -ItemType Junction -Path "D:\ai-workspace\jspg-data-labeling-aiws\.open
 ## 验证命令（可复现）
 
 ```powershell
-$cli="C:\Users\Zicol\AppData\Roaming\ai.opencode.desktop\cli\2.0.32-x64\opencode-cli.exe"
+# CLI 版本目录随桌面端升级变化，按实际目录调整（如 2.1.1-x64）
+$cli="C:\Users\Zicol\AppData\Roaming\ai.opencode.desktop\cli\2.1.1-x64\opencode-cli.exe"
 $loc="D%3A%5Cai-workspace%5Cjspg-data-labeling-aiws"
 
 # provider 信息
