@@ -1,6 +1,6 @@
 {
   "name": "opencode-multi-repo-vcs",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Aggregate uncommitted changes from nested Git repositories into OpenCode's review panel",
   "type": "module",
   "license": "MIT",
@@ -13,12 +13,11 @@
     "nested-repositories"
   ],
   "exports": {
-    ".": "./src/index.ts",
-    "./server": "./src/index.ts"
+    ".": "./dist/index.js",
+    "./server": "./dist/index.js"
   },
   "files": [
-    "src",
-    "index.ts",
+    "dist",
     "README.md",
     "LICENSE"
   ],
@@ -26,14 +25,17 @@
     "node": ">=22"
   },
   "scripts": {
+    "build": "esbuild src/index.ts --bundle --format=esm --platform=node --target=node20 --external:@opencode/plugin --outfile=dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "node --test \"src/**/*.test.ts\""
+    "test": "node --test \"src/**/*.test.ts\"",
+    "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
     "@opencode/plugin": "2.1.1"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "esbuild": "^0.28.2",
     "typescript": "^5.8.2"
   }
 }
