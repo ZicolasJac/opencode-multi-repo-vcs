@@ -1,108 +1,122 @@
 # opencode-multi-repo-vcs
 
-把工作区根仓库与 `.codespace/*` 下各独立 git 子仓库的未提交改动，聚合展示到 OpenCode 变更栏（Review 面板）。
+把工作区根仓库与嵌套的独立 Git 仓库（monorepo、`.codespace/*`、`services/*` 等）的未提交改动，聚合到 OpenCode 的变更栏（Review 面板）。
 
 - 插件 id：`multi-repo-vcs`
 - VCS provider id：`multi-repo`
-- 目标 OpenCode：V2（desktop 2.0.32 / 2.1.0 / 2.1.1 实测通过）
+- 目标：OpenCode V2（2.1.x 实测）
+- 仅支持 Git
 
-## 状态（2026-10-21）
+## 功能
 
-MVP 已实现并在 D:\ai-workspace\jspg-data-labeling-aiws 试点通过 **API 层**实测：
+- 根仓库 + 任意数量的嵌套仓库统一展示，路径保持为工作区内的真实相对路径；
+- 支持 `working` / `branch` / `committed` 三种 diff 模式，以及 2.1.0+ 的审阅基线（`vcs.base`）；
+- 空仓库（还没有任何提交）里的 staged / untracked 文件也能展示；
+- 自动过滤根仓库中的 gitlink（submodule）与未跟踪目录条目，避免重复噪音；
+- 扫描支持深度、额外起点、忽略目录；junction / symlink 目录可用。
 
-| 验证项 | 结果 |
-| --- | --- |
-| 插件自动加载 | server 热发现（junction 目录），并订阅 `index.ts` / `src/index.ts` 源文件用于热重载 |
-| provider 接管 | `GET /api/vcs` 返回 `provider: "multi-repo"`，`branch.current/default` 正确 |
-| status 聚合 | 子仓库文件以 `.codespace/<repo>/` 前缀返回，`additions` 正确 |
-| diff 路由 | 按前缀路由到子仓库，patch 生成正确（含 new file / hunk） |
-| untracked 新文件 diff | `git diff --no-index` 构造 patch，实测通过（2026-10-19 修复） |
-| 空仓库子仓库 diff | 无任何提交（unborn HEAD）的子仓库回退到 `--cached` + 工作区 diff，staged/untracked 均能出 patch（2026-10-21 修复） |
-| 审阅基线 base | 2.1.0+ `GET /api/vcs/base`：按分支 reflog 创建来源推断，失败回落默认分支（2026-10-21 实现） |
-| `.codespace` 子目录为 junction | 发现逻辑用 `statSync` 兜底，junction/symlink 也能识别（2026-10-21 修复） |
-| 源码热重载 | 修改 `src/index.ts` 后 server 自动 cleanup + setup（实测 8 秒内生效） |
-| 清理恢复 | 测试产生的临时文件清理后，API 恢复空数组 |
+## 安装
 
-UI 层观察项：
-
-- [x] 变更栏出现 `.codespace/<repo>/...` 条目并可展开查看 diff（2026-10-19 用户界面确认：层级、A 标记、diff 内容/行号/中文均正常）
-- [ ] 变更后自动刷新（还是需要 Ctrl+R）——待日常使用中观察
-
-## 工作原理
-
-1. 通过插件 API `ctx.vcs.transform` 注册自定义 VCS provider（`multi-repo`），并以 `editor.default.set` 设为默认；
-2. `status`：根仓库 + `.codespace/*` 下含 `.git` 的子仓库分别执行
-   `git status --porcelain=v1 -z --untracked-files=all`，子仓库路径统一加前缀；
-3. `diff`：按请求路径前缀路由到所属仓库，执行对应 mode（working / branch / committed）的 `git diff`；
-4. `info` / `branches`：以根仓库为准，失败时容错返回。
-5. `base`：按当前分支的 reflog 创建来源推断审阅基线，拿不到则回落仓库默认分支（`origin/main` → `main` → `origin/master` → `master`），detached HEAD / 空仓库返回 `null`。
-
-## 当前部署（2026-10-19）
-
-- **已全局启用**：`C:\Users\Zicol\.config\opencode\opencode.json` 的 `plugins` 数组引用本项目绝对路径（`D:/zjc-ai-workspace/opencode-multi-repo-vcs`），所有工作区生效；配置热重载，无需重启；
-- 试点工作区的 Junction 已移除（统一由全局配置提供）；
-- 回退：删除 `plugins` 数组中的对应条目（改动前备份：`opencode.json.bak-20261019`）。
-
-## 接入方式（参考）
-
-### 方式一：项目级（单工作区）
-
-在工作区放一个 Junction 指向本项目：
-
-```powershell
-# 本机 Windows PowerShell 执行
-New-Item -ItemType Directory -Path "D:\ai-workspace\jspg-data-labeling-aiws\.opencode\plugins" -Force
-New-Item -ItemType Junction -Path "D:\ai-workspace\jspg-data-labeling-aiws\.opencode\plugins\multi-repo-vcs" -Target "D:\zjc-ai-workspace\opencode-multi-repo-vcs"
-```
-
-### 方式二：全局（所有工作区一次生效）
-
-在 `C:\Users\Zicol\.config\opencode\opencode.json` 增加：
+在 `opencode.json(c)` 的 `plugins` 中用对象形式加载：
 
 ```jsonc
 {
-  "plugins": ["D:/zjc-ai-workspace/opencode-multi-repo-vcs"]
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    {
+      "package": "opencode-multi-repo-vcs",
+      "options": {
+        "depth": 2
+      }
+    }
+  ]
 }
 ```
 
-## 解除/回退
+本地开发时 `package` 可以填绝对路径：
 
-- 项目级：删除对应 `.opencode\plugins\multi-repo-vcs` Junction 即可；
-- 全局：移除 `plugins` 里的对应条目；
-- 插件对本机文件零写入（除自身 `.dev\plugin.log` 探针日志）。
+```jsonc
+{
+  "plugins": [
+    {
+      "package": "D:/path/to/opencode-multi-repo-vcs",
+      "options": {}
+    }
+  ]
+}
+```
+
+`options` 可省略，全部使用默认值。
+
+## 配置
+
+| 键 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `depth` | number | `2` | 默认起点（工作区根）的扫描深度。`0` = 只看根自身，`1` = 直接子目录，`2` = 再下一层 |
+| `scanRoots` | `(string \| { path, depth })[]` | `[]` | 额外的扫描起点（相对工作区根，可多个）。字符串项继承 `depth`，对象项可单独指定 `depth` |
+| `ignoreDirs` | string[] | `[".git",".worktrees","node_modules","dist","build","vendor","target","coverage"]` | 扫描时按目录名跳过 |
+| `takeover` | `"auto" \| "always" \| "never"` | `auto` | 何时接管默认 VCS provider。`auto` = 发现至少一个嵌套仓库时才接管 |
+| `gitBinary` | string | `"git"` | Git 可执行文件；PATH 里没有 git 时填绝对路径 |
+| `maxUntrackedFiles` | number | `50` | 每个仓库最多为多少个未跟踪文件生成 diff |
+| `maxUntrackedBytes` | number | `2097152` | 单个未跟踪文件生成 diff 的字节上限（2 MiB） |
+| `concurrency` | number | `4` | 同时执行的 Git 命令数（1–16） |
+| `logLevel` | `"off" \| "debug"` | `off` | `off` 只记录错误；`debug` 额外输出请求级日志（写入 server 日志，不落文件） |
+
+### 常用示例
+
+```jsonc
+// 根 + 一级子目录（更保守的扫描范围）
+{ "depth": 1 }
+
+// 根 + 一级子目录 + services 下两层
+{ "depth": 1, "scanRoots": [".codespace", { "path": "services", "depth": 2 }] }
+
+// 精确只聚合指定仓库
+{
+  "depth": 0,
+  "scanRoots": [".codespace/repo-a", ".codespace/repo-b"]
+}
+```
+
+## 发现规则
+
+1. 工作区根是 Git 仓库时纳入（路径前缀为空），并继续向下扫描（根同时是容器）；
+2. 其余目录命中 Git 仓库即纳入，且不再深入（避免嵌套仓库套娃）；
+3. `scanRoots` 的每个起点：本身是仓库则直接纳入，否则按该项 `depth` 扫描其子目录；
+4. 所有路径必须落在工作区内，越界路径会被跳过；
+5. 结果按绝对路径去重，展示路径为相对工作区根的 POSIX 路径。
+
+默认 `depth: 2` 是为了兼容 `<工作区>/.codespace/<repo>` 这类两层布局；如果你的仓库都在一级子目录，配 `depth: 1` 即可。
+
+## 工作原理
+
+- 通过插件 API `ctx.vcs.transform` 注册自定义 VCS provider，并按 `takeover` 决定是否设为默认；
+- `status`：对根仓库与每个嵌套仓库执行 `git status --porcelain=v1 -z --untracked-files=all`，嵌套仓库路径加前缀；
+- `diff`：按请求的 `worktree` 与 mode 分别执行 `git diff`；未跟踪文件用 `git diff --no-index` 构造新增 patch；空仓库回退为 `--cached` + 工作区 diff；
+- `base`：优先按分支 reflog 的创建来源推断审阅基线，其次回落默认分支（`origin/main` → `main` → `origin/master` → `master`）；
+- `info` / `branches`：以根仓库为准，失败时容错返回。
 
 ## 已知限制
 
-- untracked 新文件：已支持 diff（`git diff --no-index` 构造 patch）；上限为单仓库每次最多 50 个未跟踪文件、单文件 2MiB（超出仅 status 可见，diff 留空）；
-- `/undo` 快照回滚不会覆盖子仓库文件（OpenCode 快照机制跳过 git-ignored 路径，与本插件无关，属官方 issue #30065）；
-- 「最后一轮变更」（`turn` 模式）走 OpenCode 自带 `session.diff` 快照，不经过本 provider，因此该模式看不到 `.codespace` 子仓库改动；看多仓聚合请用「Git changes」模式；
-- 工作区刚打开、插件 `setup` 尚未完成时，宿主可能短暂回退到内置 git provider（表现为一次只含根仓库的结果），随后的事件/刷新会自动纠正；
-- 根仓库若没有忽略 `.codespace/`，`status` 会额外出现一条 `.codespace/<repo>/` 目录条目（属根仓库未跟踪目录，与子仓库文件条目并存，不影响 diff）；
-- 子仓库发现只扫描 `.codespace/*` 一层目录；
-- `additions/deletions` 对超大未跟踪文件（>2MiB）计 0。
+- 「最后一轮变更」（`turn` 模式）使用 OpenCode 自带 `session.diff` 快照，不经过本 provider，因此看不到嵌套仓库改动；查看聚合结果请用「Git changes」模式；
+- `/undo` 快照回滚不会覆盖嵌套仓库文件（OpenCode 快照机制跳过 Git ignored 路径，与本插件无关）；
+- 只支持 Git；
+- diff 输出上限按**文件边界**截断，超限的文件会整体不显示（避免输出半截 patch）；
+- 工作区刚打开、插件 `setup` 尚未完成时，宿主可能短暂回退到内置 Git provider，随后会自动纠正；
+- 工作区运行中新增嵌套仓库时，`takeover: "auto"` 的默认 provider 选择需要重载工作区或刷新后生效。
 
 ## 开发
 
-- 入口：`index.ts`（转发）→ `src/index.ts`（实现）
-- 安装依赖：`npm install`
-- 类型来源：`@opencode/plugin@2.1.1`（与当前桌面端 CLI 版本对齐；插件 API 在 2.0.32 → 2.1.x 未变）
-- 探针日志：`.dev/plugin.log`
-- server 日志：`C:\Users\Zicol\.local\share\opencode\log\opencode.log`（搜索 `multi-repo-vcs`）
-- 修改源码后 server 自动重载（watcher 已订阅），无需重启
-
-## 验证命令（可复现）
-
-```powershell
-# CLI 版本目录随桌面端升级变化，按实际目录调整（如 2.1.1-x64）
-$cli="C:\Users\Zicol\AppData\Roaming\ai.opencode.desktop\cli\2.1.1-x64\opencode-cli.exe"
-$loc="D%3A%5Cai-workspace%5Cjspg-data-labeling-aiws"
-
-# provider 信息
-& $cli api get "/api/vcs?location[directory]=$loc"
-
-# 聚合后的变更列表
-& $cli api get "/api/vcs/status?location[directory]=$loc"
-
-# 聚合后的 diff
-& $cli api get "/api/vcs/diff?location[directory]=$loc&mode=working&context=3"
+```sh
+npm install
+npm run typecheck
+npm test
 ```
+
+`npm test` 使用 Node 内置测试运行器（Node 24），会在系统临时目录创建真实的 Git 仓库作为夹具，不依赖网络。
+
+修改 `src/` 后，如果 OpenCode server 已订阅插件源文件，会自动重载；也可以用 `opencode service restart` 重启服务。
+
+## License
+
+MIT
